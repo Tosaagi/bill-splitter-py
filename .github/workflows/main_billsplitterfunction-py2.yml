@@ -79,5 +79,7 @@ jobs:
         with:
           app-name: 'BillSplitterFunction-py2'
           slot-name: 'Production'
+          enable-oryx-build: true
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+
           
