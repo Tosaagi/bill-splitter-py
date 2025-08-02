@@ -1,6 +1,12 @@
 {
   "version": "2.0",
   "logging": {
+    "logLevel": {
+      "default": "Trace",
+      "Host.Results": "Information",
+      "Function": "Trace",
+      "Host.Aggregator": "Information"
+    },
     "applicationInsights": {
       "samplingSettings": {
         "isEnabled": true,
