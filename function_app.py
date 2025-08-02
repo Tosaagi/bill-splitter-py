@@ -11,11 +11,10 @@ from azure.core.exceptions import ResourceNotFoundError
 from datetime import datetime, timedelta
 
 # ========================================================================
-#  1. DEFINE THE APP & GET CREDENTIALS
-#
-#  All functions will be attached to this single 'app' object.
+#  1. DEFINE A BLUEPRINT
+#  All functions will be attached to this blueprint object.
 # ========================================================================
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+bp = func.Blueprint() 
 
 # Get credentials from environment variables
 STORAGE_CONNECT_STR = os.getenv("billsplitterstorage0725_STORAGE")
@@ -27,15 +26,15 @@ RECEIPT_CONTAINER_NAME = "receipts"
 RESULTS_TABLE_NAME = "receiptresults"
 
 # ========================================================================
-#  2. GET UPLOAD URL FUNCTION
+#  2. GET UPLOAD URL FUNCTION (attached to the blueprint)
 # ========================================================================
-@app.route(route="get_upload_url", methods=["GET"])
+@bp.route(route="get_upload_url", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_upload_url(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Request received for a SAS upload URL.')
     try:
         blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECT_STR)
         blob_name = f"{uuid.uuid4()}.jpg"
-        
+
         sas_token = generate_blob_sas(
             account_name=blob_service_client.account_name,
             container_name=RECEIPT_CONTAINER_NAME,
@@ -45,7 +44,7 @@ def get_upload_url(req: func.HttpRequest) -> func.HttpResponse:
             expiry=datetime.utcnow() + timedelta(minutes=5)
         )
         sas_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{RECEIPT_CONTAINER_NAME}/{blob_name}?{sas_token}"
-        
+
         return func.HttpResponse(
             body=json.dumps({"sasUrl": sas_url, "blobName": blob_name}),
             mimetype="application/json",
@@ -56,14 +55,14 @@ def get_upload_url(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Failed to generate upload URL.", status_code=500)
 
 # ========================================================================
-#  3. GET RECEIPT RESULTS FUNCTION
+#  3. GET RECEIPT RESULTS FUNCTION (attached to the blueprint)
 # ========================================================================
-@app.route(route="get_receipt_results/{blobName}")
+@bp.route(route="get_receipt_results/{blobName}", auth_level=func.AuthLevel.ANONYMOUS)
 def get_receipt_results(req: func.HttpRequest) -> func.HttpResponse:
     blob_name = req.route_params.get('blobName')
     if not blob_name:
         return func.HttpResponse("Please provide a blobName.", status_code=400)
-    
+
     receipt_id = os.path.splitext(blob_name)[0]
     logging.info(f"Request received for receipt results for ID: {receipt_id}")
 
@@ -75,7 +74,7 @@ def get_receipt_results(req: func.HttpRequest) -> func.HttpResponse:
             entity['items'] = json.loads(entity['items'])
 
         return func.HttpResponse(body=json.dumps(entity, default=str), mimetype="application/json", status_code=200)
-        
+
     except ResourceNotFoundError:
         return func.HttpResponse("Not found.", status_code=404)
     except Exception as e:
@@ -83,10 +82,10 @@ def get_receipt_results(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Error fetching results.", status_code=500)
 
 # ========================================================================
-#  4. ANALYZE RECEIPT FUNCTION (BLOB TRIGGER)
+#  4. ANALYZE RECEIPT FUNCTION (attached to the blueprint)
 # ========================================================================
-@app.blob_trigger(arg_name="blob", path="receipts/{name}", connection="billsplitterstorage0725_STORAGE")
-@app.table_output(arg_name="tableOutput", tableName=RESULTS_TABLE_NAME, connection="billsplitterstorage0725_STORAGE")
+@bp.blob_trigger(arg_name="blob", path="receipts/{name}", connection="billsplitterstorage0725_STORAGE")
+@bp.table_output(arg_name="tableOutput", tableName=RESULTS_TABLE_NAME, connection="billsplitterstorage0725_STORAGE")
 def AnalyzeReceipt(blob: func.InputStream, tableOutput: func.Out[str]):
     receipt_id = os.path.splitext(blob.name.split('/')[-1])[0]
     logging.info(f"AnalyzeReceipt triggered for blob: {blob.name}")
@@ -94,7 +93,7 @@ def AnalyzeReceipt(blob: func.InputStream, tableOutput: func.Out[str]):
     try:
         doc_analysis_client = DocumentAnalysisClient(DOC_INTELLIGENCE_ENDPOINT, AzureKeyCredential(DOC_INTELLIGENCE_KEY))
         blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECT_STR)
-        
+
         sas_token = generate_blob_sas(
             account_name=blob_service_client.account_name,
             container_name=RECEIPT_CONTAINER_NAME,
@@ -104,7 +103,7 @@ def AnalyzeReceipt(blob: func.InputStream, tableOutput: func.Out[str]):
             expiry=datetime.utcnow() + timedelta(minutes=5)
         )
         sas_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{blob.name}?{sas_token}"
-        
+
         poller = doc_analysis_client.begin_analyze_document_from_url("prebuilt-receipt", sas_url)
         result = poller.result()
 
@@ -118,9 +117,9 @@ def AnalyzeReceipt(blob: func.InputStream, tableOutput: func.Out[str]):
                         "description": item_props.get("Description", {}).value,
                         "totalPrice": item_props.get("TotalPrice", {}).value or 0
                     })
-            
+
             calculated_subtotal = round(sum(item['totalPrice'] for item in items_list), 2)
-            
+
             output_data = {
                 "PartitionKey": "receipt",
                 "RowKey": receipt_id,
@@ -129,8 +128,14 @@ def AnalyzeReceipt(blob: func.InputStream, tableOutput: func.Out[str]):
                 "tax": receipt.get("TotalTax", {}).value or 0,
                 "total": receipt.get("Total", {}).value or 0
             }
-            
+
             tableOutput.set(json.dumps(output_data))
             logging.info(f"Successfully processed receipt data for: {receipt_id}")
     except Exception as e:
         logging.error(f"Error in AnalyzeReceipt: {e}")
+
+# ========================================================================
+#  5. CREATE THE MAIN APP AND REGISTER THE BLUEPRINT
+# ========================================================================
+app = func.FunctionApp()
+app.register_blueprint(bp)
